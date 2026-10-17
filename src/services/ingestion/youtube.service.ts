@@ -56,16 +56,51 @@ export function parseSrt(srt: string): string {
     .join(" ");
 }
 
-function throwTranscriptApiError(status: number, videoId: string): never {
-  if (status === 404) {
-    throw new YoutubeTranscriptVideoUnavailableError(videoId);
+/**
+ * Turns a Google API failure into a typed error.
+ *
+ * The response body is read and logged because the status alone is
+ * ambiguous: 403 covers a missing scope, an API-key restriction, an
+ * exhausted quota, and Google's rule that `captions.download` only serves
+ * videos the authenticated principal can actually read. Treating every 403 as
+ * throttling produced a wrong message, so the reason is surfaced.
+ */
+async function transcriptApiError(
+  response: Response,
+  videoId: string,
+): Promise<Error> {
+  const reason = await readGoogleReason(response);
+  const detail = (await response.text()).slice(0, 300);
+
+  console.error(
+    `YOUTUBE API ${response.status}${reason ? ` (${reason})` : ""} ` +
+      `for ${videoId}: ${detail}`,
+  );
+
+  if (response.status === 404) {
+    return new YoutubeTranscriptVideoUnavailableError(videoId);
   }
 
-  if (status === 429 || status === 403) {
-    throw new YoutubeTranscriptTooManyRequestError();
+  // keyInvalid, ipRefererBlocked, accessNotConfigured and forbidden all
+  // arrive as 403 and mean a credentials problem, not throttling.
+  if (response.status === 429 || reason === "quotaExceeded") {
+    return new YoutubeTranscriptTooManyRequestError();
   }
 
-  throw new YoutubeTranscriptNotAvailableError(videoId);
+  return new YoutubeTranscriptNotAvailableError(videoId);
+}
+
+async function readGoogleReason(response: Response): Promise<string | null> {
+  try {
+    const cloned = response.clone();
+    const body = (await cloned.json()) as {
+      error?: { errors?: { reason?: string }[] };
+    };
+
+    return body.error?.errors?.[0]?.reason ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -82,15 +117,20 @@ async function fetchViaOAuth(
 ): Promise<string> {
   const accessToken = await getAccessToken(clerkUserId);
 
+  //
+  // Only the OAuth bearer token is sent. Supplying an API key alongside a
+  // bearer token asks Google to authenticate twice, which the YouTube Data API
+  // rejects -- and it would be the wrong credential for a method that demands
+  // a principal anyway.
+  const headers = { Authorization: `Bearer ${accessToken}` };
+
   const listResponse = await fetch(
-    `${API_BASE}/captions?part=snippet&videoId=${encodeURIComponent(
-      videoId,
-    )}&key=${encodeURIComponent(apiKey())}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
+    `${API_BASE}/captions?part=snippet&videoId=${encodeURIComponent(videoId)}`,
+    { headers },
   );
 
   if (!listResponse.ok) {
-    throwTranscriptApiError(listResponse.status, videoId);
+    throw await transcriptApiError(listResponse, videoId);
   }
 
   const listed = (await listResponse.json()) as {
@@ -108,12 +148,12 @@ async function fetchViaOAuth(
     tracks.find((entry) => entry.snippet?.trackKind !== "asr") ?? tracks[0]!;
 
   const downloadResponse = await fetch(
-    `${API_BASE}/captions/${encodeURIComponent(track.id)}?tfmt=srt&key=${encodeURIComponent(apiKey())}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
+    `${API_BASE}/captions/${encodeURIComponent(track.id)}?tfmt=srt`,
+    { headers },
   );
 
   if (!downloadResponse.ok) {
-    throwTranscriptApiError(downloadResponse.status, videoId);
+    throw await transcriptApiError(downloadResponse, videoId);
   }
 
   const content = parseSrt(await downloadResponse.text());
