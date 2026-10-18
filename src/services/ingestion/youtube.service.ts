@@ -586,12 +586,21 @@ export function describeTranscriptFailure(
     };
   }
 
-  if (error instanceof YoutubeTranscriptDisabledError) {
+  /*
+ * Deliberately does not claim the video has no captions.
+ *
+ * YouTube does not distinguish "this video has none" from "I will not tell
+ * you" in the response, and an authenticated request is the clearer case: it
+ * is accepted, the video is reported as playable, and the caption tracks are
+ * simply absent. Videos that certainly do have captions reach this branch, so
+ * asserting otherwise sends people looking for a problem with their video.
+ */
+if (error instanceof YoutubeTranscriptDisabledError) {
     return {
       status: 400,
       error:
-        "This video has no captions available to read. Videos without " +
-        "captions cannot be added as a source.",
+        "This video's transcript could not be read from this server. It may " +
+        "have no captions, or YouTube may be refusing to release them here.",
     };
   }
 
