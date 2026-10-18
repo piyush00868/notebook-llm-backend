@@ -10,21 +10,40 @@ import { getAccessToken } from "../youtube-oauth.service";
 
 const API_BASE = "https://www.googleapis.com/youtube/v3";
 
-function extractYoutubeVideoId(url: string) {
-  const parsed = new URL(url);
+/**
+ * The submitted value is not a YouTube video link.
+ *
+ * A user error rather than a server fault, and one worth naming precisely:
+ * `new URL` throws on a malformed value, which would otherwise surface as an
+ * unreadable 500 from deep inside this file.
+ */
+export class InvalidYoutubeUrlError extends Error {
+  constructor() {
+    super("That does not look like a YouTube video link.");
+    this.name = "InvalidYoutubeUrlError";
+  }
+}
 
-  if (parsed.hostname === "youtu.be") {
+function extractYoutubeVideoId(url: string) {
+  let parsed: URL;
+
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new InvalidYoutubeUrlError();
+  }
+
+  const hostname = parsed.hostname.replace(/^www\./, "");
+
+  if (hostname === "youtu.be") {
     return parsed.pathname.slice(1);
   }
 
-  if (
-    parsed.hostname === "youtube.com" ||
-    parsed.hostname === "www.youtube.com"
-  ) {
+  if (hostname === "youtube.com" || hostname === "m.youtube.com") {
     return parsed.searchParams.get("v");
   }
 
-  throw new Error("Invalid YouTube URL");
+  throw new InvalidYoutubeUrlError();
 }
 
 /**
@@ -184,11 +203,180 @@ function browserLikeFetch(
 }
 
 /**
+ * InnerTube is YouTube's own player endpoint: no consent page, no watch-page
+ * HTML, and no User-Agent pretending to be a desktop browser. It is reached by
+ * identifying as an official mobile app, which is why the client version and
+ * matching headers below have to travel together.
+ */
+const INNERTUBE_URL =
+  "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
+const ANDROID_CLIENT_VERSION = "20.10.38";
+const ANDROID_USER_AGENT = `com.google.android.youtube/${ANDROID_CLIENT_VERSION} (Linux; U; Android 14)`;
+
+interface CaptionTrack {
+  baseUrl: string;
+  languageCode: string;
+  kind?: string;
+}
+
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) =>
+      String.fromCodePoint(parseInt(hex, 16)),
+    )
+    .replace(/&#(\d+);/g, (_, dec) =>
+      String.fromCodePoint(parseInt(dec, 10)),
+    );
+}
+
+/**
+ * Flattens a `timedtext` XML document into readable prose.
+ *
+ * Timings and styling are dropped. Each cue holds one `<s>` per spoken word, so
+ * words are concatenated in order; cues carrying only whitespace -- the
+ * paragraph breaks YouTube interleaves -- contribute nothing. Both the modern
+ * `<p t d><s>` shape and the older `<text start dur>` one are accepted, since
+ * which one comes back depends on the track rather than on the request.
+ */
+export function parseTimedTextXml(xml: string): string {
+  const cues: string[] = [];
+  const cuePattern = /<(?:p|text)\b[^>]*>([\s\S]*?)<\/(?:p|text)>/g;
+  let cue: RegExpExecArray | null;
+
+  while ((cue = cuePattern.exec(xml)) !== null) {
+    const inner = cue[1]!;
+    let text = "";
+    const wordPattern = /<s\b[^>]*>([^<]*)<\/s>/g;
+    let word: RegExpExecArray | null;
+
+    while ((word = wordPattern.exec(inner)) !== null) {
+      text += word[1]!;
+    }
+
+    if (!text) {
+      text = inner.replace(/<[^>]+>/g, "");
+    }
+
+    text = decodeEntities(text).trim();
+
+    if (text) {
+      cues.push(text);
+    }
+  }
+
+  return cues.join(" ");
+}
+
+/**
+ * Reads captions through InnerTube, then fetches the chosen track's XML.
+ *
+ * The library does this too, but sends a bare client context and then discards
+ * every failure behind a bare `catch`. Doing it here means a video with no
+ * usable captions says why -- a blocked request and a genuinely caption-less
+ * video look identical otherwise.
+ */
+async function fetchViaInnerTube(videoId: string): Promise<string> {
+  const response = await fetch(INNERTUBE_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": ANDROID_USER_AGENT,
+      "X-YouTube-Client-Name": "3",
+      "X-YouTube-Client-Version": ANDROID_CLIENT_VERSION,
+    },
+    body: JSON.stringify({
+      context: {
+        client: {
+          clientName: "ANDROID",
+          clientVersion: ANDROID_CLIENT_VERSION,
+          androidSdkVersion: 34,
+          hl: "en",
+          gl: "US",
+        },
+      },
+      videoId,
+    }),
+  });
+
+  if (!response.ok) {
+    throw await transcriptApiError(response, videoId);
+  }
+
+  const data = (await response.json()) as {
+    playabilityStatus?: { status?: string; reason?: string };
+    captions?: {
+      playerCaptionsTracklistRenderer?: { captionTracks?: CaptionTrack[] };
+    };
+  };
+
+  const playability = data.playabilityStatus?.status;
+  const reason = data.playabilityStatus?.reason ?? "";
+  const tracks =
+    data.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
+
+  /*
+   * YouTube says why it declined before it says anything about captions, and
+   * from the outside "no tracks" means both "this video has none" and "this
+   * server may not have this video". Acting on that reason is the difference
+   * between telling someone their video is broken and telling them their video
+   * is private.
+   */
+  if (/unavailable|private|been removed|does not exist/i.test(reason)) {
+    throw new YoutubeTranscriptVideoUnavailableError(videoId);
+  }
+
+  if (playability === "LOGIN_REQUIRED" || playability === "UNPLAYABLE") {
+    console.warn(
+      `InnerTube declined ${videoId} for this server: ${playability}` +
+        `${reason ? ` (${reason})` : ""}`,
+    );
+
+    throw new YoutubeTranscriptTooManyRequestError();
+  }
+
+  if (tracks.length === 0) {
+    console.warn(
+      `InnerTube returned no caption tracks for ${videoId} ` +
+        `(playability: ${playability ?? "unknown"})`,
+    );
+
+    throw new YoutubeTranscriptDisabledError(videoId);
+  }
+
+  // Prefer a human-written track over an auto-generated one.
+  const track = tracks.find((entry) => entry.kind !== "asr") ?? tracks[0]!;
+
+  const trackResponse = await fetch(track.baseUrl, {
+    headers: {
+      "User-Agent": ANDROID_USER_AGENT,
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+  });
+
+  if (!trackResponse.ok) {
+    throw await transcriptApiError(trackResponse, videoId);
+  }
+
+  const content = parseTimedTextXml(await trackResponse.text());
+
+  if (!content.trim()) {
+    throw new YoutubeTranscriptDisabledError(videoId);
+  }
+
+  return content;
+}
+
+/**
  * Reads captions by scraping the watch page.
  *
- * The only path that works for arbitrary public videos -- which is most of
- * them -- but it depends on YouTube serving the real page rather than a bot
- * check, so it fails from datacentre IPs.
+ * The last resort, and the only path that would survive InnerTube being
+ * blocked outright. It depends on YouTube serving the real page rather than a
+ * bot check, which is what datacentre IPs are given.
  */
 async function fetchViaScrape(videoId: string): Promise<string> {
   const transcript = await YoutubeTranscript.fetchTranscript(videoId, {
@@ -203,48 +391,85 @@ async function fetchViaScrape(videoId: string): Promise<string> {
 }
 
 /**
- * Fetches a transcript, trying the official API first and scraping second.
+ * Fetches a transcript, trying each route in turn and keeping the first that
+ * works.
  *
- * The Data API is only ever a bonus. `captions.download` refuses any video the
- * authenticated user does not own unless its owner enabled third-party
- * contributions, which is the default -- so for most public videos it fails
- * with 403 however good the credentials are. That must not be fatal, because
- * scraping is the only path that works for them.
+ * 1. The official Data API, via the user's OAuth token. `captions.download`
+ *    refuses any video the user does not own unless its owner enabled
+ *    third-party contributions, which is the default -- so for most public
+ *    videos it fails with 403 however good the credentials are. A bonus, never
+ *    a guarantee.
+ * 2. InnerTube, which returns caption tracks for the same public videos the
+ *    Data API refuses.
+ * 3. The watch-page scrape, kept because it survives InnerTube being blocked.
  *
- * An earlier version fell back solely for "not connected", so a 403 aborted the
- * request and broke ingestion on networks where scraping works fine. Every
- * failure now falls through.
+ * Every earlier version let an upstream failure abort the request, so one
+ * blocked route took YouTube ingestion down with it. Each is now independent,
+ * and the error surfaced is the last one rather than whichever came first.
  */
 export async function extractYoutubeTranscript(
   url: string,
   clerkUserId?: string,
-): Promise<{ videoId: string; content: string; via: "oauth" | "scrape" }> {
+): Promise<{
+  videoId: string;
+  content: string;
+  via: "oauth" | "innertube" | "scrape";
+}> {
   const videoId = extractYoutubeVideoId(url);
 
   if (!videoId) {
-    throw new Error("Could not extract YouTube video ID");
+    throw new InvalidYoutubeUrlError();
   }
 
+  const attempts: {
+    via: "oauth" | "innertube" | "scrape";
+    run: () => Promise<string>;
+  }[] = [];
+
   if (clerkUserId) {
+    attempts.push({
+      via: "oauth",
+      run: () => fetchViaOAuth(videoId, clerkUserId),
+    });
+  }
+
+  attempts.push({ via: "innertube", run: () => fetchViaInnerTube(videoId) });
+  attempts.push({ via: "scrape", run: () => fetchViaScrape(videoId) });
+
+  let reportedError: unknown;
+  let lastError: unknown;
+
+  for (const attempt of attempts) {
     try {
       return {
         videoId,
-        content: await fetchViaOAuth(videoId, clerkUserId),
-        via: "oauth",
+        content: await attempt.run(),
+        via: attempt.via,
       };
     } catch (error) {
+      lastError = error;
+
+      /*
+       * The first public-video route is the one whose reason to believe is
+       * worth reporting. Routes disagree -- a private video reads as
+       * "unavailable" to InnerTube and as "captions disabled" to the scrape --
+       * and the earlier route is the one that looked at the video properly.
+       * The Data API is excluded outright: its 403 describes this
+       * application's permissions, which tells the user nothing about their
+       * video.
+       */
+      if (attempt.via !== "oauth" && reportedError === undefined) {
+        reportedError = error;
+      }
+
       console.warn(
-        `YouTube Data API unavailable for ${videoId}; falling back to ` +
-          `scraping: ${error instanceof Error ? error.message : String(error)}`,
+        `YouTube ${attempt.via} route failed for ${videoId}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
 
-  return {
-    videoId,
-    content: await fetchViaScrape(videoId),
-    via: "scrape",
-  };
+  throw reportedError ?? lastError;
 }
 
 /**
@@ -273,11 +498,19 @@ export interface TranscriptFailure {
 export function describeTranscriptFailure(
   error: unknown,
 ): TranscriptFailure | null {
+  if (error instanceof InvalidYoutubeUrlError) {
+    return {
+      status: 400,
+      error: "That does not look like a YouTube video link.",
+    };
+  }
+
   if (error instanceof YoutubeTranscriptDisabledError) {
     return {
       status: 400,
       error:
-        "This video has no captions available to read. Connect a Google account if captions keep failing.",
+        "This video has no captions available to read. Videos without " +
+        "captions cannot be added as a source.",
     };
   }
 
@@ -292,8 +525,8 @@ export function describeTranscriptFailure(
     return {
       status: 429,
       error:
-        "YouTube served this server a bot check instead of a transcript. " +
-        "Retrying will not help -- the video is fine.",
+        "YouTube refused to serve a transcript to this server. This is a " +
+        "network restriction, not a problem with the video.",
     };
   }
 
