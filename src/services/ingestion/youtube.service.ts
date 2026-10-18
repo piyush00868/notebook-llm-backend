@@ -147,14 +147,53 @@ async function fetchViaOAuth(
 }
 
 /**
+ * The library's own User-Agent is a 2020 Chrome build and it sends no
+ * cookies at all. Both are things a real browser would not do, and both are
+ * the sort of detail a bot check weighs, so they are corrected here.
+ */
+const MODERN_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+
+/**
+ * A `fetch` shaped like a browser's, for the library to make its calls with.
+ *
+ * `youtube-transcript` accepts this through `config.fetch`, which is the only
+ * lever it exposes over how requests look on the wire.
+ *
+ * The User-Agent is only set when the library did not set one itself: it
+ * deliberately sends an Android User-Agent for its InnerTube call, and
+ * overwriting that would break the client context that call depends on.
+ */
+function browserLikeFetch(
+  input: string | URL | Request,
+  init?: RequestInit,
+): Promise<Response> {
+  const headers = new Headers(init?.headers);
+
+  if (!headers.has("User-Agent")) {
+    headers.set("User-Agent", MODERN_USER_AGENT);
+  }
+
+  headers.set("Accept-Language", "en-US,en;q=0.9");
+
+  // Recorded consent. Absent this, YouTube answers datacentre visitors with an
+  // interstitial before any transcript request is considered.
+  headers.set("Cookie", "CONSENT=YES+cb.20210328-17-p0.en+FX+000; SOCS=CAI");
+
+  return fetch(input, { ...init, headers });
+}
+
+/**
  * Reads captions by scraping the watch page.
  *
  * The only path that works for arbitrary public videos -- which is most of
- * them -- but it depends on YouTube serving the real page rather than a
- * consent interstitial, so it fails from datacentre IPs.
+ * them -- but it depends on YouTube serving the real page rather than a bot
+ * check, so it fails from datacentre IPs.
  */
 async function fetchViaScrape(videoId: string): Promise<string> {
-  const transcript = await YoutubeTranscript.fetchTranscript(videoId);
+  const transcript = await YoutubeTranscript.fetchTranscript(videoId, {
+    fetch: browserLikeFetch,
+  });
 
   if (transcript.length === 0) {
     throw new YoutubeTranscriptDisabledError(videoId);
@@ -253,7 +292,8 @@ export function describeTranscriptFailure(
     return {
       status: 429,
       error:
-        "YouTube is throttling transcript requests right now. Try again shortly.",
+        "YouTube served this server a bot check instead of a transcript. " +
+        "Retrying will not help -- the video is fine.",
     };
   }
 
