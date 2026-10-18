@@ -430,6 +430,72 @@ async function fetchViaInnerTube(videoId: string): Promise<string> {
 }
 
 /**
+ * Where the off-origin transcript fetch lives.
+ *
+ * Cloudflare serves the request rather than this server. YouTube answers
+ * datacentre addresses with a bot check before it will release captions for
+ * anyone else's video, and that judgement is about the network, not the
+ * request -- Render, Vercel and the free CORS relays were all measured and
+ * all refused. The Worker runs the same InnerTube call that works locally and
+ * returns plain text; see frontend/worker.
+ */
+const TRANSCRIPT_WORKER_URL =
+  process.env.YOUTUBE_TRANSCRIPT_WORKER_URL ??
+  "https://mindora-youtube-transcript.creative-jackfruit.workers.dev";
+
+/** A transcript fetch should never hold a request open longer than this. */
+const WORKER_TIMEOUT_MS = 20_000;
+
+/**
+ * Asks the Worker to read the transcript on our behalf.
+ *
+ * The caption URL InnerTube hands back is signature-bound to whoever asked
+ * for it, so it cannot be fetched here and replayed there: the Worker has to
+ * do the whole job, which is why this is a request for text rather than an
+ * attempt to borrow a URL.
+ */
+async function fetchViaWorker(videoId: string): Promise<string> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  if (process.env.YOUTUBE_TRANSCRIPT_SECRET) {
+    headers["x-proxy-key"] = process.env.YOUTUBE_TRANSCRIPT_SECRET;
+  }
+
+  const response = await fetch(TRANSCRIPT_WORKER_URL, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ videoId }),
+    signal: AbortSignal.timeout(WORKER_TIMEOUT_MS),
+  });
+
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 300);
+
+    console.error(`TRANSCRIPT WORKER ${response.status} for ${videoId}: ${detail}`);
+
+    if (response.status === 404) {
+      throw new YoutubeTranscriptVideoUnavailableError(videoId);
+    }
+
+    if (response.status === 429) {
+      throw new YoutubeTranscriptTooManyRequestError();
+    }
+
+    throw new YoutubeTranscriptNotAvailableError(videoId);
+  }
+
+  const data = (await response.json()) as { content?: string };
+
+  if (!data.content?.trim()) {
+    throw new YoutubeTranscriptDisabledError(videoId);
+  }
+
+  return data.content;
+}
+
+/**
  * Reads captions by scraping the watch page.
  *
  * The last resort, and the only path that would survive InnerTube being
@@ -471,7 +537,7 @@ export async function extractYoutubeTranscript(
 ): Promise<{
   videoId: string;
   content: string;
-  via: "oauth" | "innertube" | "scrape";
+  via: "oauth" | "innertube" | "worker" | "scrape";
 }> {
   const videoId = extractYoutubeVideoId(url);
 
@@ -495,7 +561,7 @@ export async function extractYoutubeTranscript(
   }
 
   const attempts: {
-    via: "oauth" | "innertube" | "scrape";
+    via: "oauth" | "innertube" | "worker" | "scrape";
     run: () => Promise<string>;
   }[] = [];
 
@@ -510,6 +576,7 @@ export async function extractYoutubeTranscript(
     via: "innertube",
     run: () => fetchViaInnerTube(videoId),
   });
+  attempts.push({ via: "worker", run: () => fetchViaWorker(videoId) });
   attempts.push({ via: "scrape", run: () => fetchViaScrape(videoId) });
 
   let reportedError: unknown;
