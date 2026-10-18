@@ -317,22 +317,19 @@ export function parseTimedTextXml(xml: string): string {
  * usable captions says why -- a blocked request and a genuinely caption-less
  * video look identical otherwise.
  */
-async function fetchViaInnerTube(
-  videoId: string,
-  accessToken?: string,
-): Promise<string> {
+async function fetchViaInnerTube(videoId: string): Promise<string> {
   const notes: string[] = [];
   let declined = false;
 
   /*
-   * A request carrying a real account behind it is not the same request as an
-   * anonymous one. Datacentre addresses are routinely answered with a login
-   * wall, and that judgement is made before any video is looked at -- so when a
-   * token is available it travels with every call, and the wall is not raised.
+   * No Authorization header, deliberately.
+   *
+   * InnerTube does not accept the YouTube Data API token -- it authenticates
+   * its own callers and rejects an unexpected bearer outright. Sending one
+   * turned a 200 carrying a playability status into a bare 400, which reads as
+   * "we sent something wrong" and hides the real answer. Anonymous at least
+   * gets told plainly that it is being treated as a bot.
    */
-  const auth = accessToken
-    ? { Authorization: `Bearer ${accessToken}` }
-    : {};
 
   for (const client of INNER_TUBE_CLIENTS) {
     const response = await fetch(INNERTUBE_URL, {
@@ -342,7 +339,6 @@ async function fetchViaInnerTube(
         "User-Agent": client.userAgent,
         "X-YouTube-Client-Name": client.id,
         "X-YouTube-Client-Version": client.version,
-        ...auth,
       },
       body: JSON.stringify({
         context: {
@@ -409,7 +405,6 @@ async function fetchViaInnerTube(
       headers: {
         "User-Agent": client.userAgent,
         "Accept-Language": "en-US,en;q=0.9",
-        ...auth,
       },
     });
 
@@ -513,7 +508,7 @@ export async function extractYoutubeTranscript(
 
   attempts.push({
     via: "innertube",
-    run: () => fetchViaInnerTube(videoId, accessToken),
+    run: () => fetchViaInnerTube(videoId),
   });
   attempts.push({ via: "scrape", run: () => fetchViaScrape(videoId) });
 
