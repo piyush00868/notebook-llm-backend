@@ -119,9 +119,8 @@ async function transcriptApiError(
  */
 async function fetchViaOAuth(
   videoId: string,
-  clerkUserId: string,
+  accessToken: string,
 ): Promise<string> {
-  const accessToken = await getAccessToken(clerkUserId);
   const headers = { Authorization: `Bearer ${accessToken}` };
 
   const listResponse = await fetch(
@@ -318,9 +317,22 @@ export function parseTimedTextXml(xml: string): string {
  * usable captions says why -- a blocked request and a genuinely caption-less
  * video look identical otherwise.
  */
-async function fetchViaInnerTube(videoId: string): Promise<string> {
+async function fetchViaInnerTube(
+  videoId: string,
+  accessToken?: string,
+): Promise<string> {
   const notes: string[] = [];
   let declined = false;
+
+  /*
+   * A request carrying a real account behind it is not the same request as an
+   * anonymous one. Datacentre addresses are routinely answered with a login
+   * wall, and that judgement is made before any video is looked at -- so when a
+   * token is available it travels with every call, and the wall is not raised.
+   */
+  const auth = accessToken
+    ? { Authorization: `Bearer ${accessToken}` }
+    : {};
 
   for (const client of INNER_TUBE_CLIENTS) {
     const response = await fetch(INNERTUBE_URL, {
@@ -330,6 +342,7 @@ async function fetchViaInnerTube(videoId: string): Promise<string> {
         "User-Agent": client.userAgent,
         "X-YouTube-Client-Name": client.id,
         "X-YouTube-Client-Version": client.version,
+        ...auth,
       },
       body: JSON.stringify({
         context: {
@@ -396,6 +409,7 @@ async function fetchViaInnerTube(videoId: string): Promise<string> {
       headers: {
         "User-Agent": client.userAgent,
         "Accept-Language": "en-US,en;q=0.9",
+        ...auth,
       },
     });
 
@@ -470,19 +484,37 @@ export async function extractYoutubeTranscript(
     throw new InvalidYoutubeUrlError();
   }
 
+  /*
+   * Resolved once and shared. Refreshing a token is a round trip to Google, and
+   * both authenticated routes want the same one. A user who has not connected
+   * an account is not an error here -- the public routes still run without it.
+   */
+  let accessToken: string | undefined;
+
+  if (clerkUserId) {
+    try {
+      accessToken = await getAccessToken(clerkUserId);
+    } catch {
+      accessToken = undefined;
+    }
+  }
+
   const attempts: {
     via: "oauth" | "innertube" | "scrape";
     run: () => Promise<string>;
   }[] = [];
 
-  if (clerkUserId) {
+  if (accessToken) {
     attempts.push({
       via: "oauth",
-      run: () => fetchViaOAuth(videoId, clerkUserId),
+      run: () => fetchViaOAuth(videoId, accessToken!),
     });
   }
 
-  attempts.push({ via: "innertube", run: () => fetchViaInnerTube(videoId) });
+  attempts.push({
+    via: "innertube",
+    run: () => fetchViaInnerTube(videoId, accessToken),
+  });
   attempts.push({ via: "scrape", run: () => fetchViaScrape(videoId) });
 
   let reportedError: unknown;
