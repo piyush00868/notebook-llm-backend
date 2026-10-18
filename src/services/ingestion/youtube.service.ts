@@ -438,10 +438,16 @@ async function fetchViaInnerTube(videoId: string): Promise<string> {
  * request -- Render, Vercel and the free CORS relays were all measured and
  * all refused. The Worker runs the same InnerTube call that works locally and
  * returns plain text; see frontend/worker.
+ *
+ * Unset by default, because it proved not to hold. It served a full transcript
+ * twice, from two separate networks, and was then refused on every subsequent
+ * call: Cloudflare's egress was flagged for repeated automated lookups. That
+ * is the shape of the whole problem -- no datacentre address is durable here,
+ * which is exactly what a paid residential proxy exists to solve. The route is
+ * kept because the code is proven correct and is where a durable egress drops
+ * in, but it only runs when a URL is configured.
  */
-const TRANSCRIPT_WORKER_URL =
-  process.env.YOUTUBE_TRANSCRIPT_WORKER_URL ??
-  "https://mindora-youtube-transcript.creative-jackfruit.workers.dev";
+const TRANSCRIPT_WORKER_URL = process.env.YOUTUBE_TRANSCRIPT_WORKER_URL;
 
 /** A transcript fetch should never hold a request open longer than this. */
 const WORKER_TIMEOUT_MS = 20_000;
@@ -463,7 +469,10 @@ async function fetchViaWorker(videoId: string): Promise<string> {
     headers["x-proxy-key"] = process.env.YOUTUBE_TRANSCRIPT_SECRET;
   }
 
-  const response = await fetch(TRANSCRIPT_WORKER_URL, {
+  // Only reachable when the route was enqueued, which requires this to exist.
+  const workerUrl = TRANSCRIPT_WORKER_URL!;
+
+  const response = await fetch(workerUrl, {
     method: "POST",
     headers,
     body: JSON.stringify({ videoId }),
@@ -576,7 +585,9 @@ export async function extractYoutubeTranscript(
     via: "innertube",
     run: () => fetchViaInnerTube(videoId),
   });
-  attempts.push({ via: "worker", run: () => fetchViaWorker(videoId) });
+  if (TRANSCRIPT_WORKER_URL) {
+    attempts.push({ via: "worker", run: () => fetchViaWorker(videoId) });
+  }
   attempts.push({ via: "scrape", run: () => fetchViaScrape(videoId) });
 
   let reportedError: unknown;
