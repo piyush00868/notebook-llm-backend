@@ -5,16 +5,15 @@ import { getAuth } from "@clerk/express";
 import { getNotebookById } from "../services/notebook.service";
 import { extractPdfText } from "../services/ingestion/pdf.service";
 import { extractUrlText } from "../services/ingestion/url.service";
-import { createDocumentChunks } from "../services/ingestion/chunk.service";
+import { enqueueIngestion } from "../services/ingestion/ingest.queue";
 import { extractYoutubeTranscript, describeTranscriptFailure } from "../services/ingestion/youtube.service";
-import { indexDocumentChunks } from "../services/vector/vector.service";
 import { assertOwner } from "../services/authorization.service";
 import {
   createDocument,
   getDocumentById,
   deleteDocument,
-  updateDocumentStatus,
 } from "../services/document.service";
+
 const createDocumentSchema = z.object({
   title: z.string().min(1),
   sourceType: z.enum(["PDF", "WEB", "YOUTUBE", "TEXT"]),
@@ -294,25 +293,21 @@ export async function uploadPdfController(
       title,
       sourceType: "PDF",
       content: extracted,
-      status: "PENDING",
+      status: "PROCESSING",
       notebookId,
     });
-await updateDocumentStatus(document.id, "PROCESSING");
+    /*
+     * Chunking and embedding continue after this response. The upload has
+     * already been accepted and stored, so the source appears immediately
+     * and settles to COMPLETED or FAILED on its own -- which the client
+     * already polls for.
+     */
+    enqueueIngestion(document.id);
 
-try {
-  await createDocumentChunks(document.id);
-  await indexDocumentChunks(document.id);
-
-  await updateDocumentStatus(document.id, "COMPLETED");
-} catch (error) {
-  await updateDocumentStatus(document.id, "FAILED");
-
-  throw error;
-}
-return res.status(201).json({
-  message: "PDF uploaded and processed successfully",
-  document,
-});
+    return res.status(201).json({
+      message: "PDF uploaded and queued for indexing",
+      document,
+    });
 
   } catch (error) {
     console.error("PDF INGESTION ERROR:", error);
@@ -410,27 +405,13 @@ export async function uploadUrlController(
       notebookId,
     });
 
-    try {
-      await createDocumentChunks(document.id);
-      await indexDocumentChunks(document.id);
+    enqueueIngestion(document.id);
 
-      await updateDocumentStatus(
-        document.id,
-        "COMPLETED",
-      );
-    } catch (error) {
-      await updateDocumentStatus(
-        document.id,
-        "FAILED",
-      );
-
-      throw error;
-    }
-
-    return res.status(201).json({
-      ...document,
-      status: "COMPLETED",
-    });
+    /*
+     * Reports PROCESSING rather than COMPLETED, because it is: indexing
+     * continues after this response and the client polls until it settles.
+     */
+    return res.status(201).json(document);
   } catch (error) {
     console.error("URL INGESTION ERROR:", error);
 
@@ -517,27 +498,13 @@ export async function uploadYoutubeController(
       notebookId,
     });
 
-    try {
-      await createDocumentChunks(document.id);
-      await indexDocumentChunks(document.id);
+    enqueueIngestion(document.id);
 
-      await updateDocumentStatus(
-        document.id,
-        "COMPLETED",
-      );
-    } catch (error) {
-      await updateDocumentStatus(
-        document.id,
-        "FAILED",
-      );
-
-      throw error;
-    }
-
-    return res.status(201).json({
-      ...document,
-      status: "COMPLETED",
-    });
+    /*
+     * Reports PROCESSING rather than COMPLETED, because it is: indexing
+     * continues after this response and the client polls until it settles.
+     */
+    return res.status(201).json(document);
   } catch (error) {
     /*
      * A video we cannot read a transcript from is not a server fault, so the
@@ -561,12 +528,13 @@ export async function uploadYoutubeController(
 /**
  * Pasted text.
  *
- * Mirrors the URL and YouTube controllers: store the normalised text, chunk
- * it, then index the chunks so retrieval can actually find them.
+ * Mirrors the URL and YouTube controllers: store the normalised text, then
+ * queue it for chunking and indexing.
  *
- * Without `indexDocumentChunks` the document and its chunks exist but carry
- * no vector in Pinecone, so a question can never surface it -- the source
- * would sit in the notebook permanently unreachable.
+ * Indexing is what makes a source reachable. A document whose chunks carry no
+ * vector in Pinecone can never be surfaced by a question, so it would sit in
+ * the notebook permanently invisible -- which is why the queue, rather than
+ * this handler, is what decides the source is usable.
  */
 export async function uploadTextController(
   req: Request,
@@ -636,27 +604,13 @@ export async function uploadTextController(
       notebookId,
     });
 
-    try {
-      await createDocumentChunks(document.id);
-      await indexDocumentChunks(document.id);
+    enqueueIngestion(document.id);
 
-      await updateDocumentStatus(
-        document.id,
-        "COMPLETED",
-      );
-    } catch (error) {
-      await updateDocumentStatus(
-        document.id,
-        "FAILED",
-      );
-
-      throw error;
-    }
-
-    return res.status(201).json({
-      ...document,
-      status: "COMPLETED",
-    });
+    /*
+     * Reports PROCESSING rather than COMPLETED, because it is: indexing
+     * continues after this response and the client polls until it settles.
+     */
+    return res.status(201).json(document);
   } catch (error) {
     console.error("TEXT INGESTION ERROR:", error);
 

@@ -8,6 +8,7 @@ import authRoutes from "./routes/auth.routes";
 import workspaceRoutes from "./routes/workspace.routes";
 import notebookRoutes from "./routes/notebook.routes";
 import documentRoutes from "./routes/document.routes";
+import { recoverInterruptedIngestions } from "./services/ingestion/ingest.queue";
 import { clerkMiddleware } from '@clerk/express'
 
 
@@ -27,6 +28,10 @@ app.use("/documents", documentRoutes);
 
 const PORT = process.env.PORT || 4000;
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server running on http://localhost:${PORT}`);
+
+  // Jobs that died with the previous process will never report themselves, so
+  // anything left mid-indexing is closed out here. Failure is non-fatal.
+  await recoverInterruptedIngestions();
 });

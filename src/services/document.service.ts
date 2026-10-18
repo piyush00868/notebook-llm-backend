@@ -79,3 +79,15 @@ export async function updateDocumentStatus(
       status,
     });
 }
+
+/**
+ * Every document in a given status.
+ *
+ * Used to find sources left mid-ingestion by a restart. Kept as an equality
+ * filter rather than an `in`, matching the rest of the service.
+ */
+export async function findDocumentsByStatus(status: string) {
+  return db.orm.public.Document
+    .where({ status })
+    .all();
+}
