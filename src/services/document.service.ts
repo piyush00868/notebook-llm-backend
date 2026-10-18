@@ -1,5 +1,6 @@
 import { db } from "../prisma/db";
 import { normalizeText } from "./ingestion/text.service";
+import { deleteDocumentVectors } from "./vector/vector.service";
 type CreateDocumentInput = {
   title: string;
   sourceType: string;
@@ -52,6 +53,22 @@ export async function deleteDocument(id: number) {
 
   if (!document) {
     return null;
+  }
+
+  /*
+   * Vectors go before the chunks, because they are found by the chunk ids
+   * that the delete below removes.
+   *
+   * Left in place deliberately: a source whose vectors outlived it still looks
+   * like a plausible search result and quietly consumes one of the fixed
+   * slots retrieval asks for. But refusing to delete a source because a vector
+   * store is unreachable would be a worse failure, and `pruneOrphanVectors`
+   * exists to catch up afterwards.
+   */
+  try {
+    await deleteDocumentVectors(id);
+  } catch (error) {
+    console.error(`Could not remove vectors for document ${id}:`, error);
   }
 
   await db.orm.public.Chunk
