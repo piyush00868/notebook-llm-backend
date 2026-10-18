@@ -205,13 +205,51 @@ function browserLikeFetch(
 /**
  * InnerTube is YouTube's own player endpoint: no consent page, no watch-page
  * HTML, and no User-Agent pretending to be a desktop browser. It is reached by
- * identifying as an official mobile app, which is why the client version and
+ * identifying as an official client, which is why the client version and
  * matching headers below have to travel together.
  */
 const INNERTUBE_URL =
   "https://www.youtube.com/youtubei/v1/player?prettyPrint=false";
-const ANDROID_CLIENT_VERSION = "20.10.38";
-const ANDROID_USER_AGENT = `com.google.android.youtube/${ANDROID_CLIENT_VERSION} (Linux; U; Android 14)`;
+
+interface InnerTubeClient {
+  name: string;
+  /** The numeric client id, which the `X-YouTube-Client-Name` header requires. */
+  id: string;
+  version: string;
+  userAgent: string;
+  extra: Record<string, unknown>;
+}
+
+/**
+ * Clients to try, in order.
+ *
+ * They are not interchangeable from the outside: YouTube decides per client how
+ * much trust a request has earned, and that judgement includes the caller's IP.
+ * One client being served a login wall says nothing about the next, so a
+ * refusal is a reason to try the following one rather than to give up.
+ *
+ * The mobile clients are listed because they are the ones that serve captions
+ * without a proof-of-origin token. Desktop and embedded contexts were tested
+ * and return no tracks for public videos at all, so they are not listed.
+ */
+const INNER_TUBE_CLIENTS: InnerTubeClient[] = [
+  {
+    name: "ANDROID",
+    id: "3",
+    version: "20.10.38",
+    userAgent:
+      "com.google.android.youtube/20.10.38 (Linux; U; Android 14)",
+    extra: { androidSdkVersion: 34 },
+  },
+  {
+    name: "IOS",
+    id: "5",
+    version: "20.10.4",
+    userAgent:
+      "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3 like Mac OS X)",
+    extra: { deviceModel: "iPhone16,2" },
+  },
+];
 
 interface CaptionTrack {
   baseUrl: string;
@@ -281,94 +319,105 @@ export function parseTimedTextXml(xml: string): string {
  * video look identical otherwise.
  */
 async function fetchViaInnerTube(videoId: string): Promise<string> {
-  const response = await fetch(INNERTUBE_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent": ANDROID_USER_AGENT,
-      "X-YouTube-Client-Name": "3",
-      "X-YouTube-Client-Version": ANDROID_CLIENT_VERSION,
-    },
-    body: JSON.stringify({
-      context: {
-        client: {
-          clientName: "ANDROID",
-          clientVersion: ANDROID_CLIENT_VERSION,
-          androidSdkVersion: 34,
-          hl: "en",
-          gl: "US",
-        },
+  const notes: string[] = [];
+  let declined = false;
+
+  for (const client of INNER_TUBE_CLIENTS) {
+    const response = await fetch(INNERTUBE_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": client.userAgent,
+        "X-YouTube-Client-Name": client.id,
+        "X-YouTube-Client-Version": client.version,
       },
-      videoId,
-    }),
-  });
+      body: JSON.stringify({
+        context: {
+          client: {
+            clientName: client.name,
+            clientVersion: client.version,
+            hl: "en",
+            gl: "US",
+            ...client.extra,
+          },
+        },
+        videoId,
+        contentCheckOk: true,
+        racyCheckOk: true,
+      }),
+    });
 
-  if (!response.ok) {
-    throw await transcriptApiError(response, videoId);
-  }
+    if (!response.ok) {
+      notes.push(`${client.name} HTTP ${response.status}`);
+      continue;
+    }
 
-  const data = (await response.json()) as {
-    playabilityStatus?: { status?: string; reason?: string };
-    captions?: {
-      playerCaptionsTracklistRenderer?: { captionTracks?: CaptionTrack[] };
+    const data = (await response.json()) as {
+      playabilityStatus?: { status?: string; reason?: string };
+      captions?: {
+        playerCaptionsTracklistRenderer?: { captionTracks?: CaptionTrack[] };
+      };
     };
-  };
 
-  const playability = data.playabilityStatus?.status;
-  const reason = data.playabilityStatus?.reason ?? "";
-  const tracks =
-    data.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
+    const playability = data.playabilityStatus?.status;
+    const reason = data.playabilityStatus?.reason ?? "";
+    const tracks =
+      data.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
 
-  /*
-   * YouTube says why it declined before it says anything about captions, and
-   * from the outside "no tracks" means both "this video has none" and "this
-   * server may not have this video". Acting on that reason is the difference
-   * between telling someone their video is broken and telling them their video
-   * is private.
-   */
-  if (/unavailable|private|been removed|does not exist/i.test(reason)) {
-    throw new YoutubeTranscriptVideoUnavailableError(videoId);
-  }
-
-  if (playability === "LOGIN_REQUIRED" || playability === "UNPLAYABLE") {
-    console.warn(
-      `InnerTube declined ${videoId} for this server: ${playability}` +
-        `${reason ? ` (${reason})` : ""}`,
+    notes.push(
+      `${client.name} ${playability ?? "unknown"}` +
+        `${reason ? ` (${reason})` : ""} ${tracks.length} track(s)`,
     );
 
-    throw new YoutubeTranscriptTooManyRequestError();
+    /*
+     * YouTube says why it declined before it says anything about captions, and
+     * from the outside "no tracks" means both "this video has none" and "this
+     * server may not have this video". Acting on that reason is the difference
+     * between telling someone their video is broken and telling them their
+     * video is private.
+     */
+    if (/unavailable|private|been removed|does not exist/i.test(reason)) {
+      throw new YoutubeTranscriptVideoUnavailableError(videoId);
+    }
+
+    if (playability === "LOGIN_REQUIRED" || playability === "UNPLAYABLE") {
+      declined = true;
+      continue;
+    }
+
+    if (tracks.length === 0) {
+      continue;
+    }
+
+    // Prefer a human-written track over an auto-generated one.
+    const track = tracks.find((entry) => entry.kind !== "asr") ?? tracks[0]!;
+
+    const trackResponse = await fetch(track.baseUrl, {
+      headers: {
+        "User-Agent": client.userAgent,
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+
+    if (!trackResponse.ok) {
+      notes.push(`${client.name} track HTTP ${trackResponse.status}`);
+      continue;
+    }
+
+    const content = parseTimedTextXml(await trackResponse.text());
+
+    if (content.trim()) {
+      return content;
+    }
+
+    notes.push(`${client.name} track parsed to nothing`);
   }
 
-  if (tracks.length === 0) {
-    console.warn(
-      `InnerTube returned no caption tracks for ${videoId} ` +
-        `(playability: ${playability ?? "unknown"})`,
-    );
+  console.warn(`InnerTube found no transcript for ${videoId}: ${notes.join(" | ")}`);
 
-    throw new YoutubeTranscriptDisabledError(videoId);
-  }
-
-  // Prefer a human-written track over an auto-generated one.
-  const track = tracks.find((entry) => entry.kind !== "asr") ?? tracks[0]!;
-
-  const trackResponse = await fetch(track.baseUrl, {
-    headers: {
-      "User-Agent": ANDROID_USER_AGENT,
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-  });
-
-  if (!trackResponse.ok) {
-    throw await transcriptApiError(trackResponse, videoId);
-  }
-
-  const content = parseTimedTextXml(await trackResponse.text());
-
-  if (!content.trim()) {
-    throw new YoutubeTranscriptDisabledError(videoId);
-  }
-
-  return content;
+  throw declined
+    ? new YoutubeTranscriptTooManyRequestError()
+    : new YoutubeTranscriptDisabledError(videoId);
 }
 
 /**
