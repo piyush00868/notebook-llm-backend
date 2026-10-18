@@ -6,16 +6,9 @@ import {
   YoutubeTranscriptTooManyRequestError,
   YoutubeTranscriptVideoUnavailableError,
 } from "youtube-transcript";
-import {
-  YouTubeNotConnectedError,
-  getAccessToken,
-} from "../youtube-oauth.service";
+import { getAccessToken } from "../youtube-oauth.service";
 
 const API_BASE = "https://www.googleapis.com/youtube/v3";
-
-function apiKey(): string {
-  return process.env.YOUTUBE_API_KEY ?? "";
-}
 
 function extractYoutubeVideoId(url: string) {
   const parsed = new URL(url);
@@ -56,14 +49,25 @@ export function parseSrt(srt: string): string {
     .join(" ");
 }
 
+async function readGoogleReason(response: Response): Promise<string | null> {
+  try {
+    const cloned = response.clone();
+    const body = (await cloned.json()) as {
+      error?: { errors?: { reason?: string }[] };
+    };
+
+    return body.error?.errors?.[0]?.reason ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Turns a Google API failure into a typed error.
  *
- * The response body is read and logged because the status alone is
- * ambiguous: 403 covers a missing scope, an API-key restriction, an
- * exhausted quota, and Google's rule that `captions.download` only serves
- * videos the authenticated principal can actually read. Treating every 403 as
- * throttling produced a wrong message, so the reason is surfaced.
+ * The body is logged because the status alone is ambiguous -- 403 covers a
+ * missing scope, an API-key restriction, and Google's rule that
+ * `captions.download` only serves videos the authenticated principal may read.
  */
 async function transcriptApiError(
   response: Response,
@@ -81,8 +85,6 @@ async function transcriptApiError(
     return new YoutubeTranscriptVideoUnavailableError(videoId);
   }
 
-  // keyInvalid, ipRefererBlocked, accessNotConfigured and forbidden all
-  // arrive as 403 and mean a credentials problem, not throttling.
   if (response.status === 429 || reason === "quotaExceeded") {
     return new YoutubeTranscriptTooManyRequestError();
   }
@@ -90,38 +92,17 @@ async function transcriptApiError(
   return new YoutubeTranscriptNotAvailableError(videoId);
 }
 
-async function readGoogleReason(response: Response): Promise<string | null> {
-  try {
-    const cloned = response.clone();
-    const body = (await cloned.json()) as {
-      error?: { errors?: { reason?: string }[] };
-    };
-
-    return body.error?.errors?.[0]?.reason ?? null;
-  } catch {
-    return null;
-  }
-}
-
 /**
- * Reads captions through the official Data API with the user's OAuth token.
+ * Reads captions through the official Data API using the user's OAuth token.
  *
- * `captions.download` rejects API keys outright -- Google requires a
- * credential that "asserts a principal" -- so this only works once the user
- * has connected a Google account. It is preferred over scraping because it
- * works from any network, including datacentre IPs that YouTube challenges.
+ * Only the bearer token is sent: supplying an API key alongside it asks Google
+ * to authenticate twice, which the YouTube Data API rejects.
  */
 async function fetchViaOAuth(
   videoId: string,
   clerkUserId: string,
 ): Promise<string> {
   const accessToken = await getAccessToken(clerkUserId);
-
-  //
-  // Only the OAuth bearer token is sent. Supplying an API key alongside a
-  // bearer token asks Google to authenticate twice, which the YouTube Data API
-  // rejects -- and it would be the wrong credential for a method that demands
-  // a principal anyway.
   const headers = { Authorization: `Bearer ${accessToken}` };
 
   const listResponse = await fetch(
@@ -165,6 +146,13 @@ async function fetchViaOAuth(
   return content;
 }
 
+/**
+ * Reads captions by scraping the watch page.
+ *
+ * The only path that works for arbitrary public videos -- which is most of
+ * them -- but it depends on YouTube serving the real page rather than a
+ * consent interstitial, so it fails from datacentre IPs.
+ */
 async function fetchViaScrape(videoId: string): Promise<string> {
   const transcript = await YoutubeTranscript.fetchTranscript(videoId);
 
@@ -176,12 +164,17 @@ async function fetchViaScrape(videoId: string): Promise<string> {
 }
 
 /**
- * Fetches a transcript, preferring the official API.
+ * Fetches a transcript, trying the official API first and scraping second.
  *
- * Falls back to scraping when the user has not connected a Google account.
- * That fallback is what works on a residential IP and fails from a datacentre
- * one -- `describeTranscriptFailure` turns the resulting error into an honest
- * message rather than a blanket 500.
+ * The Data API is only ever a bonus. `captions.download` refuses any video the
+ * authenticated user does not own unless its owner enabled third-party
+ * contributions, which is the default -- so for most public videos it fails
+ * with 403 however good the credentials are. That must not be fatal, because
+ * scraping is the only path that works for them.
+ *
+ * An earlier version fell back solely for "not connected", so a 403 aborted the
+ * request and broke ingestion on networks where scraping works fine. Every
+ * failure now falls through.
  */
 export async function extractYoutubeTranscript(
   url: string,
@@ -201,15 +194,10 @@ export async function extractYoutubeTranscript(
         via: "oauth",
       };
     } catch (error) {
-      // Not connected, or OAuth is not configured: fall through to scraping
-      // rather than failing, so existing behaviour is preserved.
-      if (
-        !(error instanceof YouTubeNotConnectedError) &&
-        !(error instanceof Error &&
-          /not configured/i.test(error.message))
-      ) {
-        throw error;
-      }
+      console.warn(
+        `YouTube Data API unavailable for ${videoId}; falling back to ` +
+          `scraping: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
