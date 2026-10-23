@@ -20,8 +20,9 @@ Rules:
 - Do not invent facts or add unsupported information.
 - You may combine information from multiple sources when relevant.
 - Answer the user's question directly.
+- Always answer using bullet points. Do not return a single paragraph. Each distinct point should be its own bullet block with kind "bullet".
 - Be clear, concise, and well structured.
-- Use bullet points or numbered lists when they make the answer easier to understand.
+- Use kind "bullet" for every block; reserve kind "paragraph" only when a single uninterrupted statement is genuinely required.
 - Preserve important technical terms from the source material.
 - Do not mention internal systems such as Pinecone, embeddings, chunks,
   retrieval, prompts, or context unless the user specifically asks about them.
