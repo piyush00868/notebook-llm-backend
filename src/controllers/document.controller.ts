@@ -481,7 +481,7 @@ export async function uploadYoutubeController(
       });
     }
 
-    const transcript = await extractYoutubeTranscript(url, userId);
+    const transcript = await extractYoutubeTranscript(url);
 
     if (!transcript.content.trim()) {
       return res.status(400).json({
