@@ -1,186 +1,212 @@
-import {
-  YoutubeTranscript,
-  YoutubeTranscriptDisabledError,
-  YoutubeTranscriptNotAvailableError,
-  YoutubeTranscriptNotAvailableLanguageError,
-  YoutubeTranscriptTooManyRequestError,
-  YoutubeTranscriptVideoUnavailableError,
-} from "youtube-transcript";
-
 /**
- * The submitted value is not a YouTube video link.
+ * YouTube transcript extraction via Supadata.
  *
- * A user error rather than a server fault, and one worth naming precisely:
- * `new URL` throws on a malformed value, which would otherwise surface as an
- * unreadable 500 from deep inside this file.
+ * YouTube blocks datacenter IPs (Render, Vercel, Cloudflare), so scraping the
+ * transcript directly from the server returns 429 / bot-check pages. Supadata
+ * fetches it from its own infrastructure and returns plain text.
+ *
+ * Exports are unchanged, so `document.controller.ts` needs no edits:
+ *   - extractYoutubeTranscript(url) -> { content }
+ *   - describeTranscriptFailure(error) -> { status, error } | null
+ *
+ * Env:
+ *   SUPADATA_API_KEY   required
+ *   SUPADATA_MODE      optional: "native" (default) | "auto" | "generate"
+ *                      "native" only fetches existing captions, which keeps
+ *                      free-plan credits from being spent on AI transcription.
  */
-export class InvalidYoutubeUrlError extends Error {
-  constructor() {
-    super("That does not look like a YouTube video link.");
-    this.name = "InvalidYoutubeUrlError";
+
+const SUPADATA_ENDPOINT = "https://api.supadata.ai/v1/transcript";
+const REQUEST_TIMEOUT_MS = 45_000;
+
+export type TranscriptFailureCode =
+  | "INVALID_URL"
+  | "UNAVAILABLE"
+  | "RATE_LIMITED"
+  | "TIMEOUT"
+  | "UPSTREAM";
+
+export class TranscriptError extends Error {
+  readonly code: TranscriptFailureCode;
+
+  constructor(code: TranscriptFailureCode, message: string) {
+    super(message);
+    this.name = "TranscriptError";
+    this.code = code;
   }
 }
 
-function extractYoutubeVideoId(url: string) {
+export type YoutubeTranscript = {
+  content: string;
+  language?: string;
+};
+
+type SupadataTranscriptResponse = {
+  content?: unknown;
+  lang?: string;
+  jobId?: string;
+  error?: string;
+  message?: string;
+};
+
+const YOUTUBE_HOSTS = new Set([
+  "youtube.com",
+  "www.youtube.com",
+  "m.youtube.com",
+  "music.youtube.com",
+  "youtu.be",
+  "www.youtu.be",
+]);
+
+function normaliseYoutubeUrl(raw: string): string {
   let parsed: URL;
 
   try {
-    parsed = new URL(url);
+    parsed = new URL(raw.trim());
   } catch {
-    throw new InvalidYoutubeUrlError();
+    throw new TranscriptError("INVALID_URL", "Invalid YouTube URL");
   }
 
-  const hostname = parsed.hostname.replace(/^www\./, "");
-
-  if (hostname === "youtu.be") {
-    return parsed.pathname.slice(1);
+  if (!YOUTUBE_HOSTS.has(parsed.hostname.toLowerCase())) {
+    throw new TranscriptError("INVALID_URL", "Not a YouTube URL");
   }
 
-  if (hostname === "youtube.com" || hostname === "m.youtube.com") {
-    return parsed.searchParams.get("v");
-  }
-
-  throw new InvalidYoutubeUrlError();
+  return parsed.toString();
 }
 
-/**
- * A `fetch` shaped like a browser's, for the library to make its calls with.
- *
- * `youtube-transcript` accepts this through `config.fetch`, which is the only
- * lever it exposes over how requests look on the wire.
- */
-const MODERN_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+function resolveMode(): "native" | "auto" | "generate" {
+  const mode = (process.env.SUPADATA_MODE ?? "native").toLowerCase();
 
-function browserLikeFetch(
-  input: string | URL | Request,
-  init?: RequestInit,
-): Promise<Response> {
-  const headers = new Headers(init?.headers);
-
-  if (!headers.has("User-Agent")) {
-    headers.set("User-Agent", MODERN_USER_AGENT);
-  }
-
-  headers.set("Accept-Language", "en-US,en;q=0.9");
-
-  // Recorded consent. Absent this, YouTube answers datacentre visitors with an
-  // interstitial before any transcript request is considered.
-  headers.set("Cookie", "CONSENT=YES+cb.20210328-17-p0.en+FX+000; SOCS=CAI");
-
-  return fetch(input, { ...init, headers });
+  return mode === "auto" || mode === "generate" ? mode : "native";
 }
 
-/**
- * Reads captions by scraping the watch page.
- *
- * The only path that works for arbitrary public videos -- which is most of
- * them -- but it depends on YouTube serving the real page rather than a bot
- * check, which is what datacentre IPs are given.
- */
-async function fetchViaScrape(videoId: string): Promise<string> {
-  const transcript = await YoutubeTranscript.fetchTranscript(videoId, {
-    fetch: browserLikeFetch,
-  });
-
-  if (transcript.length === 0) {
-    throw new YoutubeTranscriptDisabledError(videoId);
-  }
-
-  return transcript.map((item) => item.text).join(" ");
-}
-
-/**
- * Fetches a transcript by scraping the watch page.
- *
- * No Google account is involved: the official Data API's `captions.download`
- * refuses any video the authenticated user does not own unless its owner
- * enabled third-party contributions, which is the default -- so OAuth can
- * never retrieve an arbitrary public transcript. Scraping is the only path
- * that works for them, and it needs no credentials at all.
- */
 export async function extractYoutubeTranscript(
   url: string,
-): Promise<{ videoId: string; content: string; via: "scrape" }> {
-  const videoId = extractYoutubeVideoId(url);
+): Promise<YoutubeTranscript> {
+  const apiKey = process.env.SUPADATA_API_KEY;
 
-  if (!videoId) {
-    throw new InvalidYoutubeUrlError();
+  if (!apiKey) {
+    // A configuration fault, not a user error: surfaces as a logged 500.
+    throw new Error("SUPADATA_API_KEY is not set");
   }
 
-  return {
-    videoId,
-    content: await fetchViaScrape(videoId),
-    via: "scrape",
-  };
+  const videoUrl = normaliseYoutubeUrl(url);
+
+  const query = new URLSearchParams({
+    url: videoUrl,
+    text: "true",
+    mode: resolveMode(),
+  });
+
+  let response: Response;
+
+  try {
+    response = await fetch(`${SUPADATA_ENDPOINT}?${query.toString()}`, {
+      headers: { "x-api-key": apiKey },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") {
+      throw new TranscriptError("TIMEOUT", "Transcript request timed out");
+    }
+
+    throw new TranscriptError("UPSTREAM", "Could not reach transcript service");
+  }
+
+  const body = (await response
+    .json()
+    .catch(() => ({}))) as SupadataTranscriptResponse;
+
+  if (response.status === 429) {
+    throw new TranscriptError("RATE_LIMITED", "Transcript service at capacity");
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    // Bad or exhausted API key: server-side problem, logged as a 500.
+    throw new Error(
+      `Supadata rejected the API key (${response.status}): ${body.message ?? body.error ?? "no detail"}`,
+    );
+  }
+
+  if (response.status === 400) {
+    throw new TranscriptError("INVALID_URL", body.message ?? "Invalid request");
+  }
+
+  // 404 / 206 are how Supadata reports "this video has no transcript".
+  if (response.status === 404 || response.status === 206) {
+    throw new TranscriptError("UNAVAILABLE", "No transcript available");
+  }
+
+  if (!response.ok) {
+    throw new TranscriptError(
+      "UPSTREAM",
+      `Transcript service error (${response.status})`,
+    );
+  }
+
+  // 202 means an async job was queued (only happens for AI generation of long
+  // videos). Native mode never does this, so treat it as unavailable rather
+  // than polling inside a request handler.
+  if (response.status === 202 || body.jobId) {
+    throw new TranscriptError(
+      "UNAVAILABLE",
+      "Transcript is not available without AI generation",
+    );
+  }
+
+  const content = typeof body.content === "string" ? body.content.trim() : "";
+
+  if (!content) {
+    throw new TranscriptError("UNAVAILABLE", "Transcript is empty");
+  }
+
+  return { content, language: body.lang };
 }
 
 /**
- * A transcript the user cannot be given, described in terms the API can return.
- */
-export interface TranscriptFailure {
-  status: 400 | 404 | 429;
-  error: string;
-}
-
-/**
- * Translates transcript failures into an HTTP-shaped description.
- *
- * Without this every failure surfaced as `500 Failed to ingest YouTube
- * video`, which told users ingestion was broken when the usual cause is that
- * a video has nothing to return, or that YouTube is throttling this server.
- *
- * Returns `null` for anything unrecognised so the caller can fall back to a
- * genuine server error.
+ * Maps a failure to the HTTP response the controller should send.
+ * Returns null for anything unrecognised so the controller logs it and
+ * answers with a generic 500.
  */
 export function describeTranscriptFailure(
   error: unknown,
-): TranscriptFailure | null {
-  if (error instanceof InvalidYoutubeUrlError) {
-    return {
-      status: 400,
-      error: "That does not look like a YouTube video link.",
-    };
+): { status: number; error: string } | null {
+  if (!(error instanceof TranscriptError)) {
+    return null;
   }
 
-  if (error instanceof YoutubeTranscriptDisabledError) {
-    return {
-      status: 400,
-      error:
-        "This video's transcript could not be read from this server. It may " +
-        "have no captions, or YouTube may be refusing to release them here.",
-    };
-  }
+  switch (error.code) {
+    case "INVALID_URL":
+      return {
+        status: 400,
+        error: "That does not look like a valid YouTube video link.",
+      };
 
-  if (error instanceof YoutubeTranscriptVideoUnavailableError) {
-    return {
-      status: 404,
-      error: "This video is unavailable. It may be private or removed.",
-    };
-  }
+    case "UNAVAILABLE":
+      return {
+        status: 422,
+        error:
+          "This video has no transcript we can read. Try another video, or paste the transcript as a text source.",
+      };
 
-  if (error instanceof YoutubeTranscriptTooManyRequestError) {
-    return {
-      status: 429,
-      error:
-        "YouTube refused to serve a transcript to this server. This is a " +
-        "network restriction, not a problem with the video.",
-    };
-  }
+    case "RATE_LIMITED":
+      return {
+        status: 503,
+        error:
+          "YouTube import is busy right now. Try again in a little while, or paste the transcript as a text source.",
+      };
 
-  if (error instanceof YoutubeTranscriptNotAvailableLanguageError) {
-    return {
-      status: 400,
-      error: "This video has no captions in any available language.",
-    };
-  }
+    case "TIMEOUT":
+      return {
+        status: 504,
+        error: "Fetching the transcript took too long. Please try again.",
+      };
 
-  if (error instanceof YoutubeTranscriptNotAvailableError) {
-    return {
-      status: 400,
-      error: "No transcript could be fetched for this video.",
-    };
+    case "UPSTREAM":
+      return {
+        status: 502,
+        error:
+          "The transcript service had a problem. Try again, or paste the transcript as a text source.",
+      };
   }
-
-  return null;
 }
