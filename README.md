@@ -17,7 +17,7 @@ The client lives in [`../frontend`](../frontend) and talks to this API over HTTP
 | Vector store | Pinecone |
 | Embeddings | Mistral (`mistral-embed`) |
 | LLM | Groq (`openai/gpt-oss-20b` by default) |
-| Extraction | `pdf-parse`, `jsdom` + `@mozilla/readability`, `youtube-transcript` |
+| Extraction | `pdf-parse`, `jsdom` + `@mozilla/readability`, Supadata API (YouTube transcripts) |
 | Validation | Zod 4 |
 
 ---
@@ -101,6 +101,7 @@ There is **no build script** (TypeScript runs directly) and **no lint script**.
 | `PINECONE_INDEX_NAME` | **Yes** | none | `services/vector/vector.service.ts` |
 | `GROQ_API_KEY` | **Yes** | none | `services/LLM/llm.service.ts` |
 | `GROQ_MODEL` | No | `openai/gpt-oss-20b` | `services/LLM/llm.service.ts` |
+| `SUPADATA_API_KEY` | **Yes** | none | `services/ingestion/youtube.service.ts` — YouTube transcript fetch via Supadata API |
 
 ---
 
@@ -148,7 +149,7 @@ Routers are mounted in `src/server.ts` under `/users`, `/workspaces`, `/notebook
 | DELETE | `/documents/:id` | Returns `204` |
 | POST | `/documents/upload` | Multipart PDF, 20 MB cap, `application/pdf` only |
 | POST | `/documents/url` | Web page via Readability |
-| POST | `/documents/youtube` | Transcript |
+| POST | `/documents/youtube` | Transcript via Supadata API |
 | POST | `/documents/text` | Pasted text |
 
 ---
@@ -189,6 +190,12 @@ All four source types follow the same shape:
 
 Step 6 is what makes a source retrievable. A document with chunks but no Pinecone vectors exists in the UI and can never be cited.
 
+### YouTube ingestion (Supadata)
+
+YouTube transcripts are fetched through the Supadata API rather than direct scraping. YouTube blocks datacenter IP ranges (Render, Vercel) with `429` / bot-check pages before it will release captions; Supadata proxies the request through its own infrastructure so it works from any server. Only the bearer API key travels with the request — no OAuth consent flow, no Google credentials.
+
+Configure `SUPADATA_API_KEY` in the backend environment. The mode defaults to `native` (existing captions only, no AI transcription credits spent); set `SUPADATA_MODE=auto` or `SUPADATA_MODE=generate` to allow AI-generated transcripts for videos without existing captions.
+
 ### RAG answering
 
 1. Embed the question with Mistral.
@@ -222,7 +229,7 @@ src/
 │   ├── auth.service.ts       Clerk ↔ DB user linking
 │   ├── authorization.service.ts
 │   ├── workspace|notebook|document|chat.service.ts
-│   ├── ingestion/            pdf, url, youtube, text, chunk
+│   ├── ingestion/            pdf, url, youtube (Supadata), text, chunk
 │   ├── embedding/            Mistral
 │   ├── vector/               Pinecone
 │   ├── LLM/                  Groq + structured answer rendering
