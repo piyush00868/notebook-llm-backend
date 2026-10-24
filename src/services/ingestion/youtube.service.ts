@@ -160,7 +160,10 @@ export async function extractYoutubeTranscript(
     throw new TranscriptError("UNAVAILABLE", "Transcript is empty");
   }
 
-  return { content, language: body.lang };
+  return {
+    content,
+    ...(body.lang ? { language: body.lang } : {}),
+  };
 }
 
 /**
