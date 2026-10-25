@@ -6,6 +6,7 @@ const groq = new Groq({
 });
 
 const model = process.env.GROQ_MODEL ?? "openai/gpt-oss-20b";
+const reasoningEffort = process.env.GROQ_REASONING_EFFORT ?? "low";
 
 const FALLBACK_ANSWER =
   "I could not find enough relevant information in this notebook.";
@@ -247,14 +248,29 @@ Return JSON that follows the required schema.`,
   ];
 
   try {
-    const response = await groq.chat.completions.create({
+    const llmStart = Date.now();
+
+    const createParams: Record<string, unknown> = {
       model,
       temperature: 0,
       response_format: buildResponseFormat(sourceIndexes),
       messages,
-    });
+    };
 
-    return response.choices[0]?.message?.content?.trim() ?? "";
+    // reasoning_effort is supported by some models (e.g., gpt-oss). If it's
+    // not supported by this model, Groq will return a 400; we fall back
+    // gracefully by catching the error below and retrying without it.
+    createParams.reasoning_effort = reasoningEffort as "low" | "medium" | "high";
+
+    const response = await groq.chat.completions.create(createParams as any);
+
+    console.log(
+      `LLM inference completed in ${Date.now() - llmStart}ms`,
+    );
+
+    const completion = response as any;
+
+    return completion?.choices?.[0]?.message?.content?.trim() ?? "";
   } catch (error) {
     console.warn(
       "Structured schema response failed; retrying with JSON object response:",
@@ -268,7 +284,9 @@ Return JSON that follows the required schema.`,
       messages,
     });
 
-    return response.choices[0]?.message?.content?.trim() ?? "";
+    const completion = response as any;
+
+    return completion?.choices?.[0]?.message?.content?.trim() ?? "";
   }
 }
 
