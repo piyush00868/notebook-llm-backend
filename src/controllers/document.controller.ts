@@ -571,6 +571,12 @@ export async function uploadTextController(
       });
     }
 
+    if (rawContent.length > 500_000) {
+      return res.status(400).json({
+        error: "Text is too long. Maximum 500,000 characters allowed.",
+      });
+    }
+
     const notebook = await getNotebookById(notebookId);
 
     if (!notebook) {
