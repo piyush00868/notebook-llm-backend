@@ -119,12 +119,14 @@ export async function extractYoutubeTranscript(
     if (cached) {
       const age = Date.now() - new Date(cached.createdAt).getTime();
       if (age < CACHE_TTL_MS) {
+        console.log(`Cache hit for video ${videoId} (${Math.round(age / 1000 / 60)} min old)`);
         return { content: cached.content, language: cached.language ?? undefined };
       }
       // Expired: delete and refetch
       await cache.YoutubeTranscriptCache.delete({ where: { videoId } });
     }
-  } catch {
+  } catch (e) {
+    console.error(`Cache read failed for video ${videoId}:`, e);
     // Cache lookup failure is non-fatal; proceed to fetch
   }
 
@@ -211,7 +213,9 @@ export async function extractYoutubeTranscript(
       update: { content, language: body.lang ?? null },
       create: { videoId, content, language: body.lang ?? null },
     });
-  } catch {
+    console.log(`Cached transcript for video ${videoId}`);
+  } catch (e) {
+    console.error(`Cache write failed for video ${videoId}:`, e);
     // Cache write failure is non-fatal; return the result anyway
   }
 
