@@ -36,12 +36,17 @@ export async function indexDocumentChunks(documentId: number) {
     return 0;
   }
 
+  const embedStart = Date.now();
   const embeddings = await generateEmbeddings(
     chunks.map((chunk) => chunk.content),
+  );
+  console.log(
+    `Embeddings generated for ${chunks.length} chunks in ${Date.now() - embedStart}ms`,
   );
 
   const index = getVectorIndex();
 
+  const upsertStart = Date.now();
   await index.upsert({
     records: chunks.map((chunk, index) => ({
       id: `chunk-${chunk.id}`,
@@ -54,6 +59,9 @@ export async function indexDocumentChunks(documentId: number) {
       },
     })),
   });
+  console.log(
+    `Pinecone upsert for ${chunks.length} chunks completed in ${Date.now() - upsertStart}ms`,
+  );
 
   return chunks.length;
 }
@@ -63,10 +71,13 @@ export async function searchSimilarChunks(
   notebookId: number,
   topK = 3,
 ) {
+  const embedStart = Date.now();
   const queryEmbedding = await generateEmbeddings([query]);
+  console.log(`Query embedding generated in ${Date.now() - embedStart}ms`);
 
   const index = getVectorIndex();
 
+  const queryStart = Date.now();
   const result = await index.query({
     vector: queryEmbedding[0]!,
     topK,
@@ -77,6 +88,9 @@ export async function searchSimilarChunks(
       },
     },
   });
+  console.log(
+    `Pinecone query completed in ${Date.now() - queryStart}ms`,
+  );
 
   return result.matches ?? [];
 }

@@ -108,3 +108,6 @@ export async function findDocumentsByStatus(status: string) {
     .where({ status })
     .all();
 }
+
+// findDocumentByUrl removed: dedup must be per-notebook, not global,
+// to avoid leaking documents between users/workspaces.
