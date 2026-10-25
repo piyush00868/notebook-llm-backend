@@ -34,7 +34,7 @@ import type {
 } from '@prisma/orm-postgres/contract/types';
 
 export type StorageHash =
-  StorageHashBase<'6c99295ac6ea9a961f1b50a4bac5fb8168a1e4441fbbf77f0f2e35d372526db3'>;
+  StorageHashBase<'d2c0c3d62d2036c5a6751c7aa55745102fa971189c81fe4d0b71f9c13242db8f'>;
 export type ExecutionHash =
   ExecutionHashBase<'9d64c7fa0f239511c9064c8a1a8435c38219d1bf556cc59db0afa0cf55c22c92'>;
 export type ProfileHash =
@@ -307,6 +307,12 @@ export type FieldOutputTypes = {
       readonly ownerId: CodecTypes['pg/int4@1']['output'];
       readonly updatedAt: CodecTypes['pg/timestamptz-string@1']['output'];
     };
+    readonly YoutubeTranscriptCache: {
+      readonly content: CodecTypes['pg/text@1']['output'];
+      readonly createdAt: CodecTypes['pg/timestamptz-temporal@1']['output'];
+      readonly language: CodecTypes['pg/text@1']['output'] | null;
+      readonly videoId: CodecTypes['pg/text@1']['output'];
+    };
   };
 };
 export type FieldInputTypes = {
@@ -367,6 +373,12 @@ export type FieldInputTypes = {
       readonly name: CodecTypes['pg/text@1']['input'];
       readonly ownerId: CodecTypes['pg/int4@1']['input'];
       readonly updatedAt: CodecTypes['pg/timestamptz-string@1']['input'];
+    };
+    readonly YoutubeTranscriptCache: {
+      readonly content: CodecTypes['pg/text@1']['input'];
+      readonly createdAt: CodecTypes['pg/timestamptz-temporal@1']['input'];
+      readonly language: CodecTypes['pg/text@1']['input'] | null;
+      readonly videoId: CodecTypes['pg/text@1']['input'];
     };
   };
 };
@@ -429,6 +441,12 @@ export type StorageColumnTypes = {
       readonly ownerId: CodecTypes['pg/int4@1']['output'];
       readonly updatedAt: CodecTypes['pg/timestamptz-string@1']['output'];
     };
+    readonly YoutubeTranscriptCache: {
+      readonly content: CodecTypes['pg/text@1']['output'];
+      readonly createdAt: CodecTypes['pg/timestamptz-temporal@1']['output'];
+      readonly language: CodecTypes['pg/text@1']['output'] | null;
+      readonly videoId: CodecTypes['pg/text@1']['output'];
+    };
   };
 };
 export type StorageColumnInputTypes = {
@@ -489,6 +507,12 @@ export type StorageColumnInputTypes = {
       readonly name: CodecTypes['pg/text@1']['input'];
       readonly ownerId: CodecTypes['pg/int4@1']['input'];
       readonly updatedAt: CodecTypes['pg/timestamptz-string@1']['input'];
+    };
+    readonly YoutubeTranscriptCache: {
+      readonly content: CodecTypes['pg/text@1']['input'];
+      readonly createdAt: CodecTypes['pg/timestamptz-temporal@1']['input'];
+      readonly language: CodecTypes['pg/text@1']['input'] | null;
+      readonly videoId: CodecTypes['pg/text@1']['input'];
     };
   };
 };
@@ -570,6 +594,13 @@ export namespace Models {
     owner: public_User;
     readonly [RelationKeys]?: 'notebooks' | 'owner';
   };
+  export type public_YoutubeTranscriptCache = {
+    content: CodecTypes['pg/text@1']['output'];
+    createdAt: CodecTypes['pg/timestamptz-temporal@1']['output'];
+    language: CodecTypes['pg/text@1']['output'] | null;
+    videoId: CodecTypes['pg/text@1']['output'];
+    readonly [RelationKeys]?: never;
+  };
 }
 
 export declare const models: {
@@ -581,6 +612,7 @@ export declare const models: {
     Notebook: Models.public_Notebook;
     User: Models.public_User;
     Workspace: Models.public_Workspace;
+    YoutubeTranscriptCache: Models.public_YoutubeTranscriptCache;
   };
 };
 
@@ -757,7 +789,7 @@ type ContractBase = Omit<
                 };
               };
               primaryKey: { readonly columns: readonly ['id'] };
-              uniques: readonly [];
+              uniques: readonly [{ readonly columns: readonly ['documentId', 'chunkIndex'] }];
               indexes: readonly [
                 {
                   readonly name: 'Chunk_documentId_idx_825ef746';
@@ -1031,6 +1063,35 @@ type ContractBase = Omit<
                 },
               ];
             };
+            readonly YoutubeTranscriptCache: {
+              columns: {
+                readonly content: {
+                  readonly nativeType: 'text';
+                  readonly codecId: 'pg/text@1';
+                  readonly nullable: false;
+                };
+                readonly createdAt: {
+                  readonly nativeType: 'timestamptz';
+                  readonly codecId: 'pg/timestamptz-temporal@1';
+                  readonly nullable: false;
+                  readonly default: { readonly kind: 'function'; readonly expression: 'now()' };
+                };
+                readonly language: {
+                  readonly nativeType: 'text';
+                  readonly codecId: 'pg/text@1';
+                  readonly nullable: true;
+                };
+                readonly videoId: {
+                  readonly nativeType: 'text';
+                  readonly codecId: 'pg/text@1';
+                  readonly nullable: false;
+                };
+              };
+              primaryKey: { readonly columns: readonly ['videoId'] };
+              uniques: readonly [];
+              indexes: readonly [];
+              foreignKeys: readonly [];
+            };
           };
         };
       };
@@ -1052,6 +1113,10 @@ type ContractBase = Omit<
     readonly Notebook: { readonly namespace: 'public' & NamespaceId; readonly model: 'Notebook' };
     readonly User: { readonly namespace: 'public' & NamespaceId; readonly model: 'User' };
     readonly Workspace: { readonly namespace: 'public' & NamespaceId; readonly model: 'Workspace' };
+    readonly YoutubeTranscriptCache: {
+      readonly namespace: 'public' & NamespaceId;
+      readonly model: 'YoutubeTranscriptCache';
+    };
   };
   readonly domain: {
     readonly namespaces: {
@@ -1518,6 +1583,40 @@ type ContractBase = Omit<
                 readonly name: { readonly column: 'name' };
                 readonly ownerId: { readonly column: 'ownerId' };
                 readonly updatedAt: { readonly column: 'updatedAt' };
+              };
+            };
+          };
+          readonly YoutubeTranscriptCache: {
+            readonly fields: {
+              readonly content: {
+                readonly nullable: false;
+                readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
+              };
+              readonly createdAt: {
+                readonly nullable: false;
+                readonly type: {
+                  readonly kind: 'scalar';
+                  readonly codecId: 'pg/timestamptz-temporal@1';
+                };
+              };
+              readonly language: {
+                readonly nullable: true;
+                readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
+              };
+              readonly videoId: {
+                readonly nullable: false;
+                readonly type: { readonly kind: 'scalar'; readonly codecId: 'pg/text@1' };
+              };
+            };
+            readonly relations: Record<string, never>;
+            readonly storage: {
+              readonly table: 'YoutubeTranscriptCache';
+              readonly namespaceId: 'public';
+              readonly fields: {
+                readonly content: { readonly column: 'content' };
+                readonly createdAt: { readonly column: 'createdAt' };
+                readonly language: { readonly column: 'language' };
+                readonly videoId: { readonly column: 'videoId' };
               };
             };
           };
