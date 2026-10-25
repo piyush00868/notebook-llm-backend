@@ -164,8 +164,7 @@ function renderStructuredAnswer(
   }
 
   const validIndexes = new Set(sourceIndexes);
-  const renderedBlocks: { kind: "paragraph" | "bullet"; text: string }[] =
-    [];
+  const renderedBlocks: { kind: "paragraph" | "bullet"; text: string }[] = [];
 
   for (const block of structuredAnswer.blocks) {
     const renderedSentences = block.sentences
@@ -257,12 +256,11 @@ Return JSON that follows the required schema.`,
       messages,
     };
 
-    // reasoning_effort is supported by some models (e.g., gpt-oss). If it's
-    // not supported by this model, Groq will return a 400; we fall back
-    // gracefully by catching the error below and retrying without it.
     createParams.reasoning_effort = reasoningEffort as "low" | "medium" | "high";
 
-    const response = await groq.chat.completions.create(createParams as any);
+    const response = await groq.chat.completions.create(
+      createParams as unknown as Parameters<typeof groq.chat.completions.create>[0],
+    );
 
     console.log(
       `LLM inference completed in ${Date.now() - llmStart}ms`,
@@ -287,6 +285,72 @@ Return JSON that follows the required schema.`,
     const completion = response as any;
 
     return completion?.choices?.[0]?.message?.content?.trim() ?? "";
+  }
+}
+
+/**
+ * Stream an answer from Groq, yielding text chunks as they arrive.
+ * Returns an async generator of text chunks.
+ */
+export async function* streamGenerateAnswer(
+  question: string,
+  context: string,
+  sourceIndexes: number[],
+): AsyncGenerator<string> {
+  const validSourceIndexes = Array.from(
+    new Set(
+      sourceIndexes.filter(
+        (index) => Number.isInteger(index) && index > 0,
+      ),
+    ),
+  );
+
+  if (validSourceIndexes.length === 0) {
+    yield FALLBACK_ANSWER;
+    return;
+  }
+
+  const messages = [
+    {
+      role: "system" as const,
+      content: SYSTEM_PROMPT,
+    },
+    {
+      role: "user" as const,
+      content: `Notebook context:
+
+${context}
+
+Available citation indexes: ${validSourceIndexes
+        .map((index) => `[${index}]`)
+        .join(", ")}
+
+User question:
+${question}
+
+Answer the question using bullet points. Include citation markers like [1], [2] in your answer to reference sources.`,
+    },
+  ];
+
+  try {
+    const stream = await groq.chat.completions.create({
+      model,
+      temperature: 0,
+      messages,
+      stream: true,
+    } as any);
+
+    const streamIterator = stream as any;
+
+    for await (const chunk of streamIterator) {
+      const content = chunk.choices?.[0]?.delta?.content;
+      if (content) {
+        yield content;
+      }
+    }
+  } catch (error) {
+    console.error("LLM streaming error:", error);
+    yield FALLBACK_ANSWER;
   }
 }
 
