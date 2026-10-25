@@ -242,6 +242,12 @@ export async function askChatController(
       return res.status(400).json({ error: "Question is required" });
     }
 
+    if (question.length > 2000) {
+      return res.status(400).json({
+        error: "Question is too long. Maximum 2,000 characters allowed.",
+      });
+    }
+
     const chat = await db.orm.public.Chat
       .where({ id: chatId })
       .first();
