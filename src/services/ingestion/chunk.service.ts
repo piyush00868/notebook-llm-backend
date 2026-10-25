@@ -99,12 +99,20 @@ if (existingChunks.length > 0) {
   const chunks = chunkText(document.content);
 
   for (let index = 0; index < chunks.length; index++) {
-
-    await db.orm.public.Chunk.create({
-      content: chunks[index]!,
-      chunkIndex: index,
-      documentId,
-    });
+    try {
+      await db.orm.public.Chunk.create({
+        content: chunks[index]!,
+        chunkIndex: index,
+        documentId,
+      });
+    } catch (error) {
+      // Unique constraint on (documentId, chunkIndex) means another instance
+      // already created this chunk during a concurrent deploy. Skip it.
+      if ((error as { code?: string }).code === "P2002") {
+        continue;
+      }
+      throw error;
+    }
   }
 
   return chunks;

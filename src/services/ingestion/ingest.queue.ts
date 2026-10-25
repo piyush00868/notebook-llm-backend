@@ -33,6 +33,11 @@ interface IngestJob {
 const queue: IngestJob[] = [];
 
 let draining = false;
+let activeJobs = 0;
+
+const CONCURRENT_JOB_LIMIT = 2;
+
+const CRASH_WINDOW_MS = 2 * 60 * 1000; // 2 minutes
 
 /**
  * Indexes one document, recording the outcome on the document itself.
@@ -59,6 +64,8 @@ async function runJob({ documentId }: IngestJob): Promise<void> {
         statusError,
       );
     }
+  } finally {
+    activeJobs -= 1;
   }
 }
 
@@ -71,12 +78,18 @@ async function drain(): Promise<void> {
 
   try {
     while (queue.length > 0) {
+      // Wait for a concurrency slot if we're at the limit
+      while (activeJobs >= CONCURRENT_JOB_LIMIT) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+
       const job = queue.shift();
 
       if (!job) {
         break;
       }
 
+      activeJobs += 1;
       await runJob(job);
     }
   } finally {
@@ -102,10 +115,12 @@ export function enqueueIngestion(documentId: number): void {
 /**
  * Closes out documents that were mid-indexing when the process last stopped.
  *
- * Those jobs died with the process, so nothing would ever move them on again
- * and the source would sit showing "processing" indefinitely while the client
- * polls it forever. Marking them FAILED is the honest outcome, and it is
- * preferable to claiming they are still being worked on.
+ * Documents left in PROCESSING or PENDING are re-enqueued instead of being
+ * marked FAILED, because chunking and embedding are idempotent: re-running
+ * them produces the same vectors. Documents younger than 2 minutes are left
+ * alone — they might still be processed by a previous instance during a
+ * deploy. Documents older than 2 minutes are re-enqueued because they may
+ * have been stranded by a crashed instance.
  */
 export async function recoverInterruptedIngestions(): Promise<void> {
   try {
@@ -114,15 +129,30 @@ export async function recoverInterruptedIngestions(): Promise<void> {
       ...(await findDocumentsByStatus("PENDING")),
     ];
 
+    const now = Date.now();
+
     for (const document of stranded) {
-      await updateDocumentStatus(document.id, "FAILED");
+      const age = now - new Date(document.createdAt).getTime();
+
+      // Documents younger than 2 minutes might still be processed by the old
+      // instance during a deploy. Only re-enqueue older documents.
+      if (age < CRASH_WINDOW_MS) {
+        continue;
+      }
+
+      queue.push({ documentId: document.id });
     }
 
-    if (stranded.length > 0) {
+    if (queue.length > 0) {
       console.log(
-        `Marked ${stranded.length} interrupted ingestion(s) as FAILED`,
+        `Re-enqueued ${queue.length} interrupted ingestion(s) for processing`,
       );
     }
+
+    // Kick off draining for any re-enqueued jobs
+    void drain().catch((error) => {
+      console.error("Ingestion queue restart failed:", error);
+    });
   } catch (error) {
     // Never fatal: a server that will not start is worse than a source left
     // showing the wrong status until someone removes it.

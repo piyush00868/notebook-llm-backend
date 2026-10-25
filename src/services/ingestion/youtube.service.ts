@@ -6,7 +6,7 @@
  * fetches it from its own infrastructure and returns plain text.
  *
  * Exports are unchanged, so `document.controller.ts` needs no edits:
- *   - extractYoutubeTranscript(url) -> { content }
+ *   - extractYoutubeTranscript(url) -> { content, language? }
  *   - describeTranscriptFailure(error) -> { status, error } | null
  *
  * Env:
@@ -16,8 +16,11 @@
  *                      free-plan credits from being spent on AI transcription.
  */
 
+import { db } from "../../prisma/db";
+
 const SUPADATA_ENDPOINT = "https://api.supadata.ai/v1/transcript";
 const REQUEST_TIMEOUT_MS = 45_000;
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 export type TranscriptFailureCode =
   | "INVALID_URL"
@@ -58,6 +61,21 @@ const YOUTUBE_HOSTS = new Set([
   "www.youtu.be",
 ]);
 
+function extractYoutubeVideoIdFromUrl(url: string): string {
+  const parsed = new URL(url.trim());
+  const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+
+  if (hostname === "youtu.be") {
+    return parsed.pathname.slice(1);
+  }
+
+  if (hostname === "youtube.com" || hostname === "m.youtube.com" || hostname === "music.youtube.com") {
+    return parsed.searchParams.get("v") ?? "";
+  }
+
+  throw new TranscriptError("INVALID_URL", "Not a YouTube URL");
+}
+
 function normaliseYoutubeUrl(raw: string): string {
   let parsed: URL;
 
@@ -88,6 +106,26 @@ export async function extractYoutubeTranscript(
   if (!apiKey) {
     // A configuration fault, not a user error: surfaces as a logged 500.
     throw new Error("SUPADATA_API_KEY is not set");
+  }
+
+  const videoId = extractYoutubeVideoIdFromUrl(url);
+
+  // Check cache first
+  try {
+    const cache: any = db.orm.public;
+    const cached = await cache.YoutubeTranscriptCache.findUnique({
+      where: { videoId },
+    });
+    if (cached) {
+      const age = Date.now() - new Date(cached.createdAt).getTime();
+      if (age < CACHE_TTL_MS) {
+        return { content: cached.content, language: cached.language ?? undefined };
+      }
+      // Expired: delete and refetch
+      await cache.YoutubeTranscriptCache.delete({ where: { videoId } });
+    }
+  } catch {
+    // Cache lookup failure is non-fatal; proceed to fetch
   }
 
   const videoUrl = normaliseYoutubeUrl(url);
@@ -160,10 +198,24 @@ export async function extractYoutubeTranscript(
     throw new TranscriptError("UNAVAILABLE", "Transcript is empty");
   }
 
-  return {
+  const result = {
     content,
     ...(body.lang ? { language: body.lang } : {}),
   };
+
+  // Cache the result
+  try {
+    const cache: any = db.orm.public;
+    await cache.YoutubeTranscriptCache.upsert({
+      where: { videoId },
+      update: { content, language: body.lang ?? null },
+      create: { videoId, content, language: body.lang ?? null },
+    });
+  } catch {
+    // Cache write failure is non-fatal; return the result anyway
+  }
+
+  return result;
 }
 
 /**
