@@ -6,6 +6,8 @@ export async function answerQuestion(
   notebookId: number,
   topK = 3,
 ) {
+  const totalStart = Date.now();
+
   const chunks = await retrieveChunks(
     question,
     notebookId,
@@ -39,6 +41,10 @@ export async function answerQuestion(
     question,
     context,
     sources.map((source) => source.index),
+  );
+
+  console.log(
+    `RAG ask completed in ${Date.now() - totalStart}ms`,
   );
 
   return {
