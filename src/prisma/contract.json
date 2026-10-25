@@ -31,6 +31,10 @@
     "Workspace": {
       "model": "Workspace",
       "namespace": "public"
+    },
+    "YoutubeTranscriptCache": {
+      "model": "YoutubeTranscriptCache",
+      "namespace": "public"
     }
   },
   "domain": {
@@ -736,6 +740,57 @@
               "namespaceId": "public",
               "table": "Workspace"
             }
+          },
+          "YoutubeTranscriptCache": {
+            "fields": {
+              "content": {
+                "nullable": false,
+                "type": {
+                  "codecId": "pg/text@1",
+                  "kind": "scalar"
+                }
+              },
+              "createdAt": {
+                "nullable": false,
+                "type": {
+                  "codecId": "pg/timestamptz-temporal@1",
+                  "kind": "scalar"
+                }
+              },
+              "language": {
+                "nullable": true,
+                "type": {
+                  "codecId": "pg/text@1",
+                  "kind": "scalar"
+                }
+              },
+              "videoId": {
+                "nullable": false,
+                "type": {
+                  "codecId": "pg/text@1",
+                  "kind": "scalar"
+                }
+              }
+            },
+            "relations": {},
+            "storage": {
+              "fields": {
+                "content": {
+                  "column": "content"
+                },
+                "createdAt": {
+                  "column": "createdAt"
+                },
+                "language": {
+                  "column": "language"
+                },
+                "videoId": {
+                  "column": "videoId"
+                }
+              },
+              "namespaceId": "public",
+              "table": "YoutubeTranscriptCache"
+            }
           }
         }
       }
@@ -965,7 +1020,14 @@
                   "id"
                 ]
               },
-              "uniques": []
+              "uniques": [
+                {
+                  "columns": [
+                    "documentId",
+                    "chunkIndex"
+                  ]
+                }
+              ]
             },
             "Document": {
               "columns": {
@@ -1272,6 +1334,42 @@
                 ]
               },
               "uniques": []
+            },
+            "YoutubeTranscriptCache": {
+              "columns": {
+                "content": {
+                  "codecId": "pg/text@1",
+                  "nativeType": "text",
+                  "nullable": false
+                },
+                "createdAt": {
+                  "codecId": "pg/timestamptz-temporal@1",
+                  "default": {
+                    "expression": "now()",
+                    "kind": "function"
+                  },
+                  "nativeType": "timestamptz",
+                  "nullable": false
+                },
+                "language": {
+                  "codecId": "pg/text@1",
+                  "nativeType": "text",
+                  "nullable": true
+                },
+                "videoId": {
+                  "codecId": "pg/text@1",
+                  "nativeType": "text",
+                  "nullable": false
+                }
+              },
+              "foreignKeys": [],
+              "indexes": [],
+              "primaryKey": {
+                "columns": [
+                  "videoId"
+                ]
+              },
+              "uniques": []
             }
           }
         },
@@ -1279,7 +1377,7 @@
         "kind": "postgres-schema"
       }
     },
-    "storageHash": "6c99295ac6ea9a961f1b50a4bac5fb8168a1e4441fbbf77f0f2e35d372526db3"
+    "storageHash": "d2c0c3d62d2036c5a6751c7aa55745102fa971189c81fe4d0b71f9c13242db8f"
   },
   "execution": {
     "executionHash": "9d64c7fa0f239511c9064c8a1a8435c38219d1bf556cc59db0afa0cf55c22c92",

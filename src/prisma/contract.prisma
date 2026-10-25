@@ -75,6 +75,8 @@ model Chunk {
 
   documentId Int
   createdAt  TimestamptzString  @default(now())
+
+  @@unique([documentId, chunkIndex])
 }
 
 model Chat {
@@ -107,4 +109,11 @@ model ChatMessage {
   role      String
   content   String
   createdAt TimestamptzString  @default(now())
+}
+
+model YoutubeTranscriptCache {
+  videoId   String   @id
+  content   String
+  language  String?
+  createdAt DateTime @default(now())
 }
