@@ -42,7 +42,17 @@ app.get("/health", (_req, res) => {
 
 // Security middleware
 app.use(helmet());
-app.use(compression());
+app.use(
+  compression({
+    filter: (req, res) => {
+      if (res.getHeader("Content-Type") === "text/event-stream") {
+        return false;
+      }
+
+      return compression.filter(req, res);
+    },
+  }),
+);
 app.use(morgan(":method :url :status :response-time ms"));
 
 const allowedOrigins = [
