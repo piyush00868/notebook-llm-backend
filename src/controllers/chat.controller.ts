@@ -311,6 +311,7 @@ export async function askChatController(
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
 
     const fullAnswerChunks: string[] = [];
 
@@ -322,6 +323,7 @@ export async function askChatController(
       )) {
         fullAnswerChunks.push(text);
         res.write(`data: ${JSON.stringify({ text })}\n\n`);
+        res.flush?.();
       }
 
       const fullAnswer = fullAnswerChunks.join("");
@@ -340,10 +342,12 @@ export async function askChatController(
       );
 
       res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+      res.flush?.();
       res.end();
     } catch (error) {
       console.error("STREAM ERROR:", error);
       res.write(`data: ${JSON.stringify({ error: "Failed to stream answer" })}\n\n`);
+      res.flush?.();
       res.end();
     }
   } catch (error) {
